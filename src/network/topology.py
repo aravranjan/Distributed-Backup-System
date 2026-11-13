@@ -1,6 +1,6 @@
 from mininet.topo import Topo
 from mininet.net import Mininet
-from mininet.node import Controller
+from mininet.node import RemoteController
 from mininet.cli import CLI
 
 
@@ -8,43 +8,53 @@ class BackupTopology(Topo):
 
     def build(self):
 
-        # Create two clients
-        client1 = self.addHost('h1')
-        client2 = self.addHost('h2')
+        # Clients
+        h1 = self.addHost('h1')
+        h2 = self.addHost('h2')
 
-        # Create two backup servers
-        server1 = self.addHost('h3')
-        server2 = self.addHost('h4')
+        # Backup servers
+        h3 = self.addHost('h3')
+        h4 = self.addHost('h4')
 
-        # Create two Open vSwitch switches
-        switch1 = self.addSwitch('s1')
-        switch2 = self.addSwitch('s2')
+        # Open vSwitch switches
+        s1 = self.addSwitch('s1', protocols='OpenFlow13')
+        s2 = self.addSwitch('s2', protocols='OpenFlow13')
 
-        # Connect clients to switch 1
-        self.addLink(client1, switch1)
-        self.addLink(client2, switch1)
+        # Connect clients
+        self.addLink(h1, s1)
+        self.addLink(h2, s1)
 
-        # Connect servers to switch 2
-        self.addLink(server1, switch2)
-        self.addLink(server2, switch2)
+        # Connect backup servers
+        self.addLink(h3, s2)
+        self.addLink(h4, s2)
 
-        # Connect both switches
-        self.addLink(switch1, switch2)
+        # Connect switches
+        self.addLink(s1, s2)
 
 
 if __name__ == '__main__':
 
     topology = BackupTopology()
 
+    # IMPORTANT: Disable Mininet's default controller
     net = Mininet(
         topo=topology,
-        controller=Controller
+        controller=None,
+        autoSetMacs=True
+    )
+
+    # Connect to our existing OS-Ken controller
+    net.addController(
+        'c0',
+        controller=RemoteController,
+        ip='127.0.0.1',
+        port=6653
     )
 
     net.start()
 
     print("\nDistributed Backup Network Started!")
-    print("2 Clients, 2 Backup Servers, 2 Switches")
+    print("Connected to external OS-Ken controller")
 
     CLI(net)
 
