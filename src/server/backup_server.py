@@ -19,14 +19,19 @@ def receive_exact(conn, size):
         chunk = conn.recv(size - len(data))
 
         if not chunk:
-            raise ConnectionError("Connection interrupted")
+            raise ConnectionError(
+                "Connection interrupted"
+            )
 
         data += chunk
 
     return data
 
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server = socket.socket(
+    socket.AF_INET,
+    socket.SOCK_STREAM
+)
 
 server.setsockopt(
     socket.SOL_SOCKET,
@@ -46,77 +51,133 @@ while True:
 
     print(f"\nConnected to client: {addr}")
 
+    filepath = None
+
     try:
 
         # Receive metadata
-        header = receive_exact(conn, 10)
+        header = receive_exact(conn, 18)
 
-        filename_length, file_size = struct.unpack(
-            '!HQ', header
+        filename_length, file_size, chunk_size, total_chunks = (
+            struct.unpack('!HQII', header)
         )
 
-        # Receive filename
+        if filename_length == 0 or filename_length > 255:
+            raise ValueError("Invalid filename length")
+
+        if chunk_size != 1024 * 1024:
+            raise ValueError("Unexpected chunk size")
+
+        expected_chunks = (
+            file_size + chunk_size - 1
+        ) // chunk_size
+
+        if total_chunks != expected_chunks:
+            raise ValueError("Invalid chunk count")
+
         filename = receive_exact(
             conn, filename_length
         ).decode()
 
         filename = os.path.basename(filename)
 
-        # Receive original SHA-256 hash
+        if not filename:
+            raise ValueError("Invalid filename")
+
         original_hash = receive_exact(conn, 32)
 
-        filepath = os.path.join(SAVE_DIR, filename)
+        filepath = os.path.join(
+            SAVE_DIR,
+            filename + '.part'
+        )
 
-        # Calculate received file hash
-        sha256 = hashlib.sha256()
-
-        received = 0
+        received_hash = hashlib.sha256()
+        received_bytes = 0
 
         with open(filepath, 'wb') as file:
 
-            while received < file_size:
+            for expected_sequence in range(total_chunks):
 
-                chunk_size = min(
-                    4096,
-                    file_size - received
+                # Receive chunk metadata
+                chunk_header = receive_exact(conn, 8)
+
+                sequence, chunk_length = struct.unpack(
+                    '!II', chunk_header
                 )
 
-                data = receive_exact(conn, chunk_size)
+                expected_length = min(
+                    chunk_size,
+                    file_size - received_bytes
+                )
 
-                file.write(data)
-                sha256.update(data)
+                if sequence != expected_sequence:
+                    raise ValueError("Invalid chunk sequence")
 
-                received += len(data)
+                if chunk_length != expected_length:
+                    raise ValueError("Invalid chunk length")
 
-        received_hash = sha256.digest()
+                chunk_hash = receive_exact(conn, 32)
 
-        print(f"Received file: {filename}")
-        print(f"Original SHA-256: {original_hash.hex()}")
-        print(f"Received SHA-256: {received_hash.hex()}")
+                chunk_data = receive_exact(
+                    conn, chunk_length
+                )
 
-        # Compare hashes
-        if original_hash == received_hash:
+                calculated_hash = hashlib.sha256(
+                    chunk_data
+                ).digest()
 
-            print("INTEGRITY VERIFIED")
+                if calculated_hash != chunk_hash:
+                    raise ValueError(
+                        f"Chunk {sequence} checksum failed"
+                    )
 
-            conn.sendall(
-                b"SUCCESS: SHA-256 hashes match"
-            )
+                file.write(chunk_data)
+                received_hash.update(chunk_data)
 
-        else:
+                received_bytes += chunk_length
 
-            print("INTEGRITY CHECK FAILED")
+                print(
+                    f"Verified chunk "
+                    f"{sequence + 1}/{total_chunks}"
+                )
 
-            os.remove(filepath)
+        # Verify complete file
+        if received_bytes != file_size:
+            raise ValueError("File size mismatch")
 
-            conn.sendall(
-                b"ERROR: SHA-256 hashes do not match"
-            )
+        if received_hash.digest() != original_hash:
+            raise ValueError("Overall SHA-256 mismatch")
+
+        final_path = os.path.join(
+            SAVE_DIR,
+            filename
+        )
+
+        os.replace(filepath, final_path)
+
+        filepath = None
+
+        print(f"File received successfully: {filename}")
+        print("ALL CHUNKS VERIFIED")
+        print("OVERALL FILE INTEGRITY VERIFIED")
+
+        conn.sendall(
+            b"SUCCESS: All chunks and file hash verified"
+        )
 
     except Exception as e:
 
         print(f"Transfer failed: {e}")
 
-    finally:
+        if filepath and os.path.exists(filepath):
+            os.remove(filepath)
 
+        try:
+            conn.sendall(
+                b"ERROR: Transfer or integrity verification failed"
+            )
+        except OSError:
+            pass
+
+    finally:
         conn.close()
