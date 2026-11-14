@@ -1,0 +1,7 @@
+Server,IP,Trial,File_Size_MiB,Transfer_Time_Seconds,Throughput_MiBps,Integrity
+H3,10.0.0.3,1,5,0.16,31.25,Passed
+H3,10.0.0.3,2,5,0.10,50.00,Passed
+H3,10.0.0.3,3,5,0.11,45.45,Passed
+H4,10.0.0.4,1,5,0.11,45.45,Passed
+H4,10.0.0.4,2,5,0.14,35.71,Passed
+H4,10.0.0.4,3,5,0.18,27.78,Passed
