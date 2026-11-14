@@ -6,3 +6,6 @@ venv/
 *.log
 .DS_Store
 results/*.csv
+.venv-sdn/
+backups/
+test_files/*.bin

@@ -1,3 +1,9 @@
+
+import json
+import threading
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import networkx as nx
 
 from os_ken.base import app_manager
@@ -18,6 +24,7 @@ class PathController(app_manager.OSKenApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
+
         super(PathController, self).__init__(*args, **kwargs)
 
         self.graph = nx.Graph()
@@ -26,7 +33,136 @@ class PathController(app_manager.OSKenApp):
         self.link_ports = {}
         self.switch_ports = {}
 
-    # 1. Switch connection
+        # Monitoring information
+        self.active_paths = {}
+        self.monitor_lock = threading.Lock()
+
+        self.monitor_server = None
+        self.monitor_port = 8080
+
+        self.start_monitoring_server()
+
+    # --------------------------------------------------
+    # 1. MONITORING API
+    # --------------------------------------------------
+
+    def get_monitoring_data(self):
+
+        with self.monitor_lock:
+
+            paths = dict(self.active_paths)
+
+        return {
+            "status": "running",
+
+            "timestamp": datetime.now(
+                timezone.utc
+            ).isoformat(),
+
+            "switches": sorted(
+                list(self.graph.nodes)
+            ),
+
+            "links": [
+                {
+                    "source": source,
+                    "target": target,
+                    "status": "up"
+                }
+                for source, target in self.graph.edges()
+            ],
+
+            "active_paths": paths,
+
+            "hosts": {
+                mac: {
+                    "switch": location[0],
+                    "port": location[1]
+                }
+                for mac, location in self.hosts.items()
+            }
+        }
+
+    def start_monitoring_server(self):
+
+        controller = self
+
+        class MonitoringHandler(BaseHTTPRequestHandler):
+
+            def do_GET(self):
+
+                if self.path == "/api/topology":
+
+                    data = controller.get_monitoring_data()
+
+                elif self.path == "/api/health":
+
+                    data = {
+                        "status": "running",
+                        "service": "SDN Path Controller"
+                    }
+
+                else:
+
+                    self.send_error(404)
+                    return
+
+                response = json.dumps(data).encode()
+
+                self.send_response(200)
+
+                self.send_header(
+                    "Content-Type",
+                    "application/json"
+                )
+
+                self.send_header(
+                    "Access-Control-Allow-Origin",
+                    "*"
+                )
+
+                self.send_header(
+                    "Content-Length",
+                    str(len(response))
+                )
+
+                self.end_headers()
+
+                self.wfile.write(response)
+
+            def log_message(self, format, *args):
+                return
+
+        try:
+
+            self.monitor_server = ThreadingHTTPServer(
+                ("127.0.0.1", self.monitor_port),
+                MonitoringHandler
+            )
+
+            thread = threading.Thread(
+                target=self.monitor_server.serve_forever,
+                daemon=True
+            )
+
+            thread.start()
+
+            self.logger.info(
+                "Monitoring API running on port %s",
+                self.monitor_port
+            )
+
+        except OSError as error:
+
+            self.logger.error(
+                "Could not start monitoring API: %s",
+                error
+            )
+
+    # --------------------------------------------------
+    # 2. SWITCH CONNECTION
+    # --------------------------------------------------
+
     @set_ev_cls(
         ofp_event.EventOFPSwitchFeatures,
         CONFIG_DISPATCHER
@@ -48,11 +184,22 @@ class PathController(app_manager.OSKenApp):
             )
         ]
 
-        self.add_flow(datapath, 0, match, actions)
+        self.add_flow(
+            datapath,
+            0,
+            match,
+            actions
+        )
 
-        self.logger.info("Switch connected: %s", datapath.id)
+        self.logger.info(
+            "Switch connected: %s",
+            datapath.id
+        )
 
-    # 2. Install flow rules
+    # --------------------------------------------------
+    # 3. INSTALL FLOW RULES
+    # --------------------------------------------------
+
     def add_flow(
         self,
         datapath,
@@ -81,7 +228,10 @@ class PathController(app_manager.OSKenApp):
 
         datapath.send_msg(mod)
 
-    # 3. Clear outdated forwarding rules
+    # --------------------------------------------------
+    # 4. CLEAR OUTDATED FORWARDING RULES
+    # --------------------------------------------------
+
     def clear_flows(self, datapath):
 
         parser = datapath.ofproto_parser
@@ -97,7 +247,6 @@ class PathController(app_manager.OSKenApp):
 
         datapath.send_msg(mod)
 
-        # Restore default controller rule
         actions = [
             parser.OFPActionOutput(
                 ofproto.OFPP_CONTROLLER,
@@ -112,7 +261,10 @@ class PathController(app_manager.OSKenApp):
             actions
         )
 
-    # 4. Discover network topology
+    # --------------------------------------------------
+    # 5. DISCOVER NETWORK TOPOLOGY
+    # --------------------------------------------------
+
     def discover_topology(self):
 
         self.graph.clear()
@@ -144,7 +296,11 @@ class PathController(app_manager.OSKenApp):
             src_port = link.src.port_no
             dst_port = link.dst.port_no
 
-            self.graph.add_edge(src, dst, weight=1)
+            self.graph.add_edge(
+                src,
+                dst,
+                weight=1
+            )
 
             self.link_ports[(src, dst)] = src_port
             self.link_ports[(dst, src)] = dst_port
@@ -159,7 +315,10 @@ class PathController(app_manager.OSKenApp):
             list(self.graph.edges)
         )
 
-    # 5. Handle topology changes
+    # --------------------------------------------------
+    # 6. HANDLE TOPOLOGY CHANGES
+    # --------------------------------------------------
+
     @set_ev_cls(event.EventSwitchEnter)
     @set_ev_cls(event.EventLinkAdd)
     @set_ev_cls(event.EventLinkDelete)
@@ -168,15 +327,22 @@ class PathController(app_manager.OSKenApp):
 
         self.discover_topology()
 
-        # Clear old forwarding rules
+        # Clear old paths because the topology changed.
+        with self.monitor_lock:
+            self.active_paths.clear()
+
         for datapath in self.datapaths.values():
+
             self.clear_flows(datapath)
 
         self.logger.info(
             "Topology updated. Forwarding rules cleared."
         )
 
-    # 6. Calculate shortest path
+    # --------------------------------------------------
+    # 7. CALCULATE SHORTEST PATH
+    # --------------------------------------------------
+
     def calculate_path(self, source, destination):
 
         try:
@@ -188,7 +354,10 @@ class PathController(app_manager.OSKenApp):
                 weight="weight"
             )
 
-            self.logger.info("Selected path: %s", path)
+            self.logger.info(
+                "Selected path: %s",
+                path
+            )
 
             return path
 
@@ -205,15 +374,25 @@ class PathController(app_manager.OSKenApp):
 
             return None
 
-    # 7. Loop-safe broadcasting
-    def broadcast_packet(self, datapath, in_port, data):
+    # --------------------------------------------------
+    # 8. LOOP-SAFE BROADCASTING
+    # --------------------------------------------------
+
+    def broadcast_packet(
+        self,
+        datapath,
+        in_port,
+        data
+    ):
 
         if self.graph.number_of_edges() == 0:
             return
 
         dpid = datapath.id
 
-        tree = nx.minimum_spanning_tree(self.graph)
+        tree = nx.minimum_spanning_tree(
+            self.graph
+        )
 
         inter_switch_ports = {
             self.link_ports[(dpid, neighbor)]
@@ -230,7 +409,9 @@ class PathController(app_manager.OSKenApp):
 
         for neighbor in tree.neighbors(dpid):
 
-            port = self.link_ports.get((dpid, neighbor))
+            port = self.link_ports.get(
+                (dpid, neighbor)
+            )
 
             if port is not None:
                 output_ports.add(port)
@@ -255,7 +436,10 @@ class PathController(app_manager.OSKenApp):
 
         datapath.send_msg(out)
 
-    # 8. Install forwarding path
+    # --------------------------------------------------
+    # 9. INSTALL FORWARDING PATH
+    # --------------------------------------------------
+
     def install_path(
         self,
         path,
@@ -302,13 +486,27 @@ class PathController(app_manager.OSKenApp):
                 actions
             )
 
+        # Record the selected path for the dashboard.
+        with self.monitor_lock:
+
+            self.active_paths[destination_mac] = {
+                "path": path,
+                "destination_mac": destination_mac,
+                "timestamp": datetime.now(
+                    timezone.utc
+                ).isoformat()
+            }
+
         self.logger.info(
             "Installed path %s for %s",
             path,
             destination_mac
         )
 
-    # 9. Process incoming packets
+    # --------------------------------------------------
+    # 10. PROCESS INCOMING PACKETS
+    # --------------------------------------------------
+
     @set_ev_cls(
         ofp_event.EventOFPPacketIn,
         MAIN_DISPATCHER
@@ -323,7 +521,9 @@ class PathController(app_manager.OSKenApp):
 
         pkt = packet.Packet(msg.data)
 
-        eth = pkt.get_protocol(ethernet.ethernet)
+        eth = pkt.get_protocol(
+            ethernet.ethernet
+        )
 
         if eth is None:
             return
@@ -340,10 +540,13 @@ class PathController(app_manager.OSKenApp):
             if (dpid, neighbor) in self.link_ports
         } if dpid in self.graph else set()
 
-        # Learn host location
+        # Learn host location.
         if in_port not in inter_switch_ports:
 
-            self.hosts[src] = (dpid, in_port)
+            self.hosts[src] = (
+                dpid,
+                in_port
+            )
 
             self.logger.info(
                 "Learned host %s at switch %s port %s",
@@ -352,7 +555,7 @@ class PathController(app_manager.OSKenApp):
                 in_port
             )
 
-        # Broadcast or unknown destination
+        # Broadcast or unknown destination.
         if (
             dst == "ff:ff:ff:ff:ff:ff"
             or dst not in self.hosts
@@ -396,7 +599,9 @@ class PathController(app_manager.OSKenApp):
             return
 
         actions = [
-            datapath.ofproto_parser.OFPActionOutput(out_port)
+            datapath.ofproto_parser.OFPActionOutput(
+                out_port
+            )
         ]
 
         out = datapath.ofproto_parser.OFPPacketOut(
@@ -408,3 +613,4 @@ class PathController(app_manager.OSKenApp):
         )
 
         datapath.send_msg(out)
+

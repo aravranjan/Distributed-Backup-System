@@ -9,7 +9,10 @@ HOST = '0.0.0.0'
 PORT = 5001
 
 CHUNK_SIZE = 1024 * 1024
-SAVE_DIR = 'backups'
+SAVE_DIR = os.environ.get(
+    'BACKUP_SAVE_DIR',
+    'backups'
+)
 
 # Configurable testing delay (default: 0 seconds)
 CHUNK_DELAY_SECONDS = float(
