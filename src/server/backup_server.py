@@ -3,12 +3,18 @@ import os
 import struct
 import hashlib
 import json
+import time
 
 HOST = '0.0.0.0'
 PORT = 5001
 
 CHUNK_SIZE = 1024 * 1024
 SAVE_DIR = 'backups'
+
+# Configurable testing delay (default: 0 seconds)
+CHUNK_DELAY_SECONDS = float(
+    os.getenv('CHUNK_DELAY_SECONDS', '0')
+)
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -223,6 +229,10 @@ def handle_client(conn, addr):
                     f"{sequence + 1}/{total_chunks}"
                 )
 
+                # Optional delay for failure simulation
+                if CHUNK_DELAY_SECONDS > 0:
+                    time.sleep(CHUNK_DELAY_SECONDS)
+
         # 8. Verify the complete reconstructed file
         overall_hash = hashlib.sha256()
 
@@ -257,7 +267,6 @@ def handle_client(conn, addr):
 
         print(f"Transfer interrupted or failed: {e}")
 
-        # IMPORTANT:
         # Keep the partial file and manifest for recovery.
 
         try:

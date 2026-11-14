@@ -1,4 +1,3 @@
-
 import socket
 import os
 import struct
@@ -12,6 +11,8 @@ BACKUP_SERVERS = [
     "10.0.0.3",
     "10.0.0.4"
 ]
+
+CONNECTION_TIMEOUT = 10
 
 
 def calculate_hash(data):
@@ -38,15 +39,17 @@ def connect_to_server(server_host=None):
 
     for host in servers:
 
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client.settimeout(5)
+        client = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_STREAM
+        )
+
+        client.settimeout(CONNECTION_TIMEOUT)
 
         try:
             print(f"Trying backup server: {host}")
 
             client.connect((host, SERVER_PORT))
-
-            client.settimeout(None)
 
             print(f"Connected to backup server: {host}")
 
@@ -60,6 +63,58 @@ def connect_to_server(server_host=None):
     raise ConnectionError("No backup servers are available")
 
 
+def send_metadata(client, filename_bytes, file_size,
+                  total_chunks, overall_hash):
+
+    header = struct.pack(
+        '!HQII',
+        len(filename_bytes),
+        file_size,
+        CHUNK_SIZE,
+        total_chunks
+    )
+
+    client.sendall(header)
+    client.sendall(filename_bytes)
+    client.sendall(overall_hash)
+
+
+def receive_missing_chunks(client):
+
+    missing_count = struct.unpack(
+        '!I',
+        receive_exact(client, 4)
+    )[0]
+
+    missing_chunks = []
+
+    for _ in range(missing_count):
+
+        sequence = struct.unpack(
+            '!I',
+            receive_exact(client, 4)
+        )[0]
+
+        missing_chunks.append(sequence)
+
+    return missing_chunks
+
+
+def receive_server_response(client):
+
+    response_length = struct.unpack(
+        '!I',
+        receive_exact(client, 4)
+    )[0]
+
+    response = receive_exact(
+        client,
+        response_length
+    ).decode()
+
+    return response
+
+
 def send_file(server_host, filepath, corrupt=False, interrupt=False):
 
     if not os.path.isfile(filepath):
@@ -70,7 +125,9 @@ def send_file(server_host, filepath, corrupt=False, interrupt=False):
     file_size = os.path.getsize(filepath)
     filename_bytes = filename.encode()
 
-    total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    total_chunks = (
+        file_size + CHUNK_SIZE - 1
+    ) // CHUNK_SIZE
 
     overall_hash = hashlib.sha256()
 
@@ -85,122 +142,187 @@ def send_file(server_host, filepath, corrupt=False, interrupt=False):
 
             overall_hash.update(data)
 
-    client = None
+    original_hash = overall_hash.digest()
 
-    try:
-        # 1. Automatically select an available server
-        client, selected_server = connect_to_server(server_host)
+    # Determine server order
+    if server_host:
 
-        # 2. Send file metadata
-        header = struct.pack(
-            '!HQII',
-            len(filename_bytes),
-            file_size,
-            CHUNK_SIZE,
-            total_chunks
-        )
+        server_list = [server_host]
 
-        client.sendall(header)
-        client.sendall(filename_bytes)
-        client.sendall(overall_hash.digest())
+    else:
 
-        # 3. Receive missing chunk list
-        missing_count = struct.unpack(
-            '!I',
-            receive_exact(client, 4)
-        )[0]
+        server_list = BACKUP_SERVERS.copy()
 
-        missing_chunks = []
+    attempted_servers = set()
 
-        for _ in range(missing_count):
+    # Track intentional demonstration modes
+    interrupted_demo = False
 
-            sequence = struct.unpack(
-                '!I',
-                receive_exact(client, 4)
-            )[0]
+    print("\nStarting distributed backup...")
+    print(f"Filename: {filename}")
+    print(f"File size: {file_size} bytes")
+    print(f"Total chunks: {total_chunks}")
 
-            missing_chunks.append(sequence)
+    # Try available backup servers
+    while server_list:
 
-        print(f"\nSelected server: {selected_server}")
-        print(f"Total chunks: {total_chunks}")
-        print(f"Already backed up: {total_chunks - missing_count}")
-        print(f"Chunks remaining: {missing_count}")
+        current_server = server_list.pop(0)
 
-        # 4. Send only missing chunks
-        with open(filepath, 'rb') as file:
+        if current_server in attempted_servers:
+            continue
 
-            for sequence in missing_chunks:
+        attempted_servers.add(current_server)
 
-                file.seek(sequence * CHUNK_SIZE)
-                data = file.read(CHUNK_SIZE)
+        client = None
 
-                chunk_hash = calculate_hash(data)
+        try:
 
-                # Corruption demonstration
-                if corrupt and sequence == 2 and data:
-                    data = b'X' + data[1:]
-                    print("DEMO: Third chunk deliberately corrupted!")
+            # 1. Connect to selected server
+            client, selected_server = connect_to_server(
+                current_server
+            )
 
-                chunk_header = struct.pack(
-                    '!II',
-                    sequence,
-                    len(data)
-                )
+            # 2. Send file metadata
+            send_metadata(
+                client,
+                filename_bytes,
+                file_size,
+                total_chunks,
+                original_hash
+            )
 
-                client.sendall(chunk_header)
-                client.sendall(chunk_hash)
-                client.sendall(data)
+            # 3. Receive missing chunks
+            missing_chunks = receive_missing_chunks(client)
+
+            print(f"\nSelected server: {selected_server}")
+
+            print(f"Total chunks: {total_chunks}")
+
+            print(
+                f"Already backed up: "
+                f"{total_chunks - len(missing_chunks)}"
+            )
+
+            print(
+                f"Chunks remaining: {len(missing_chunks)}"
+            )
+
+            # 4. Send missing chunks
+            with open(filepath, 'rb') as file:
+
+                for position, sequence in enumerate(missing_chunks):
+
+                    file.seek(sequence * CHUNK_SIZE)
+
+                    data = file.read(CHUNK_SIZE)
+
+                    chunk_hash = calculate_hash(data)
+
+                    # Corruption demonstration
+                    if corrupt and sequence == 2 and data:
+
+                        data = b'X' + data[1:]
+
+                        print(
+                            "DEMO: Third chunk deliberately corrupted!"
+                        )
+
+                    chunk_header = struct.pack(
+                        '!II',
+                        sequence,
+                        len(data)
+                    )
+
+                    client.sendall(chunk_header)
+                    client.sendall(chunk_hash)
+                    client.sendall(data)
+
+                    print(
+                        f"Sent chunk "
+                        f"{sequence + 1}/{total_chunks}"
+                    )
+
+                    # Interrupted transfer demonstration
+                    if interrupt and position == 1:
+
+                        print(
+                            "\nDEMO: Interrupting transfer "
+                            "after 2 chunks!"
+                        )
+
+                        interrupted_demo = True
+
+                        return
+
+            # 5. Receive server response
+            response = receive_server_response(client)
+
+            print("\nServer response:", response)
+
+            if response.startswith("SUCCESS"):
+
+                print("\nTRANSFER SUCCESSFUL!")
+
+                print("Selected server:", selected_server)
+                print("Filename:", filename)
+                print("File size:", file_size)
 
                 print(
-                    f"Sent chunk {sequence + 1}/{total_chunks}"
+                    "Original SHA-256:",
+                    overall_hash.hexdigest()
                 )
 
-                # Interruption demonstration
-                if interrupt and missing_chunks.index(sequence) == 1:
-                    print("\nDEMO: Interrupting transfer after 2 chunks!")
-                    return
+                return
 
-        # 5. Receive server response
-        response_length = struct.unpack(
-            '!I',
-            receive_exact(client, 4)
-        )[0]
+            else:
 
-        response = receive_exact(
-            client,
-            response_length
-        ).decode()
+                print("\nTRANSFER REJECTED!")
+                print("Server error:", response)
 
-        print("\nServer response:", response)
+                return
 
-        if response.startswith("SUCCESS"):
-            print("TRANSFER SUCCESSFUL!")
-        else:
-            print("TRANSFER REJECTED!")
+        except (ConnectionError, OSError, socket.timeout) as e:
 
-        print("Selected server:", selected_server)
-        print("Filename:", filename)
-        print("File size:", file_size)
-        print("Original SHA-256:", overall_hash.hexdigest())
+            print("\nTRANSFER CONNECTION FAILED!")
+            print(f"Server: {current_server}")
+            print(f"Reason: {e}")
 
-    except Exception as e:
+            if server_list:
 
-        print("\nTransfer failed:", e)
+                print("\nINITIATING AUTOMATIC FAILOVER...")
 
-    finally:
+                print(
+                    f"Switching from {current_server} "
+                    f"to {server_list[0]}"
+                )
 
-        if client:
-            client.close()
+            else:
+
+                print("\nALL BACKUP SERVERS FAILED.")
+
+        finally:
+
+            if client:
+                client.close()
+
+    if not interrupted_demo:
+
+        print("\nBACKUP FAILED.")
+        print("No available backup server could complete the transfer.")
 
 
 if __name__ == "__main__":
 
     if len(sys.argv) < 3:
+
         print(
             "Usage:\n"
-            "Explicit server: python3 backup_client.py <server_ip> <filepath> [--corrupt] [--interrupt]\n"
-            "Automatic: python3 backup_client.py --auto <filepath> [--corrupt] [--interrupt]"
+            "Explicit server: python3 backup_client.py "
+            "<server_ip> <filepath> [--corrupt] [--interrupt]\n"
+            "Automatic: python3 backup_client.py "
+            "--auto <filepath> [--corrupt] [--interrupt]"
         )
+
         sys.exit(1)
 
     first_argument = sys.argv[1]
@@ -221,6 +343,7 @@ if __name__ == "__main__":
         option not in ("--corrupt", "--interrupt")
         for option in options
     ):
+
         print("Invalid option.")
         sys.exit(1)
 
@@ -233,4 +356,3 @@ if __name__ == "__main__":
         corrupt=corrupt_mode,
         interrupt=interrupt_mode
     )
-
