@@ -116,13 +116,17 @@ def server_is_online(name):
     if not valid_server(name) or net is None:
         return False
 
-    host = get_host(name)
+    try:
+        host = get_host(name)
 
-    result = host.cmd(
-        "ss -ltn | grep -q ':5001'; echo $?"
-    )
+        result = host.cmd(
+            "ss -ltn | grep -q ':5001'; echo $?"
+        )
 
-    return result.strip().endswith("0")
+        return result.strip().endswith("0")
+
+    except (AssertionError, AttributeError, OSError):
+        return False
 
 
 def start_server(name):
