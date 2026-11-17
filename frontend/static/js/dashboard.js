@@ -9,7 +9,7 @@ let recoveryChart = null;
 let transferPolling = false;
 const serverOnlineState = { h3: false, h4: false };
 let activeServerPanel = null;
-
+let activeBackupServer = null;
 
 // ======================================================
 // EVENT LOG
@@ -202,30 +202,40 @@ function renderTopology(data) {
 
     const targetEntries = Object.values(activePaths);
 
-    const targetEntry = targetEntries.find(
-        entry => entry.destination_mac === "00:00:00:00:00:03"
-    ) || targetEntries.find(
-        entry => entry.destination_mac === "00:00:00:00:00:04"
-    );
+    const selectedServer = activeBackupServer;
 
-    const selectedServer =
-        targetEntry?.destination_mac === "00:00:00:00:00:04"
-            ? "h4"
-            : "h3";
+    const destinationMAC = {
+	h3: "00:00:00:00:00:03",
+	h4: "00:00:00:00:00:04"
+   };
+
+    const targetEntry = selectedServer
+	? targetEntries.find(
+  	    entry =>
+		entry.destination_mac===destinationMAC[selectedServer]
+	   )
+	:null;
 
     if (targetEntry && targetEntry.path) {
+    	const switchPath = targetEntry.path.map(
+        	id => "s" + id
+    );
 
-        selectedPath = [
-            "h1",
-            ...targetEntry.path.map(id => "s" + id),
-            selectedServer
-        ];
+    // Ensure the route starts from S1 (connected to H1)
+    if (switchPath.length > 0 && switchPath[0] !== "s1") {
+        switchPath.unshift("s1");
     }
 
+    selectedPath = [
+        "h1",
+        ...switchPath,
+        selectedServer
+    ];
+}
 
     // --------------------------------------------------
     // DISPLAY COMPLETE FORWARDING PATH
-    // --------------------------------------------------
+    // -------------------------------------------------
 
     if (selectedPath.length > 0) {
 
@@ -747,12 +757,18 @@ async function pollTransfer() {
         );
 
         if (serverMatch) {
+	    const serverIP = serverMatch[1];
 
             $("selected-server").textContent =
-                serverMatch[1];
+                serverIP;
+	if (serverIP === "10.0.0.3"){
+	    activeBackupServer ="h3";
+	}else if (serverIP ==="10.0.0.4"){
+	   activeBackupServer ="h4";
+	}
+		
+	 checkController();
         }
-
-
         // CHUNK PROGRESS
 
         const chunks = combined.matchAll(
@@ -812,8 +828,14 @@ async function pollTransfer() {
 
 
         // TRANSFER FAILURE
+	   
+    const transferSucceeded =
+        combined.includes("TRANSFER SUCCESSFUL") ||
+        (data.return_code === 0 && !data.running);
 
-        if (
+    if (
+        !transferSucceeded &&
+        (
             combined.includes("TRANSFER CONNECTION FAILED") ||
             combined.includes("TRANSFER FAILED") ||
             (
@@ -821,19 +843,18 @@ async function pollTransfer() {
                 data.return_code !== 0 &&
                 !data.running
             )
-        ) {
+        )
+    ) {
 
-            $("transfer-status").textContent = "Failed";
+        $("transfer-status").textContent = "Failed";
 
-            $("integrity-status").textContent = "Failed";
+        $("integrity-status").textContent = "Failed";
 
-            $("transfer-message").textContent =
-                "Transfer failed. Check the event log.";
+        $("transfer-message").textContent =
+            "Transfer failed. Check the event log.";
 
-            addEvent("Backup transfer failed.");
-        }
-
-
+        addEvent("Backup transfer failed.");
+    }
         // CONTINUE POLLING
 
         if (data.running) {
