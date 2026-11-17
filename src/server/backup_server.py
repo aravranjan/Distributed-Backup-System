@@ -211,8 +211,12 @@ def handle_client(conn, addr):
 
                 if calculated_hash != chunk_hash:
                     raise ValueError(
-                        f"Chunk {sequence} checksum failed"
-                    )
+			f"\nCHECKSUM MISMATCH!\n"
+       			f"Chunk: {sequence + 1}\n"
+        		f"CLIENT SHA-256: {chunk_hash.hex()}\n"
+        		f"SERVER SHA-256: {calculated_hash.hex()}\n"
+        		f"TRANSFER REJECTED!"
+                                            )
 
                 # Save chunk at its correct position
                 file.seek(sequence * chunk_size)

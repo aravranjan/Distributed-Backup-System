@@ -543,6 +543,47 @@ def api_restore_link():
 
         return jsonify({"error": str(error)}), 500
 
+# MININET COMMANDS
+@app.route("/api/network/command", methods=["POST"])
+def api_network_command():
+    try:
+        if net is None:
+            return jsonify({"error": "Network is not running"}), 400
+
+        data = request.get_json(silent=True) or {}
+        command = data.get("command", "").strip()
+        parts = command.split()
+
+        if command == "pingall":
+            packet_loss = net.pingAll()
+            return jsonify({
+                "command": "pingall",
+                "packet_loss": packet_loss
+            })
+
+        hosts = ("h1", "h2", "h3", "h4")
+
+        if (
+            len(parts) == 5
+            and parts[0] in hosts
+            and parts[1] == "ping"
+            and parts[2] == "-c"
+            and parts[3].isdigit()
+            and 1 <= int(parts[3]) <= 10
+            and parts[4] in hosts
+        ):
+            output = get_host(parts[0]).cmd(
+                "ping -c " + str(int(parts[3])) + " " + parts[4]
+            )
+            return jsonify({
+                "command": command,
+                "output": output
+            })
+
+        return jsonify({"error": "Unsupported command"}), 400
+
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
 
 # ======================================================
 # BACKUP TRANSFER
@@ -583,7 +624,8 @@ def api_start_backup():
         options = {
             "normal": [],
             "corrupt": ["--corrupt"],
-            "interrupt": ["--interrupt"]
+            "interrupt": ["--interrupt"],
+	    "resume": []
         }
 
         if mode not in options:
@@ -592,7 +634,7 @@ def api_start_backup():
             }), 400
 
         command = [
-            "python3",
+            "python3", "-u",
             str(CLIENT_SCRIPT),
             "--auto",
             str(file_path),
